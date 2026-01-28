@@ -780,6 +780,20 @@ def auto_create_live_broadcast(service, use_custom_settings=True, custom_setting
         log_to_database(session_id, "ERROR", error_msg)
         return None
 
+def download_from_gdrive(url):
+    """Download file from Google Drive using gdown"""
+    try:
+        import gdown
+        output = "temp_gdrive_video.mp4"
+        # gdown handles public links directly
+        path = gdown.download(url, output, quiet=False, fuzzy=True)
+        if path:
+            return path
+        return None
+    except Exception as e:
+        st.error(f"❌ Error downloading from Google Drive: {e}")
+        return None
+
 def main():
     # Page configuration must be the first Streamlit command
     st.set_page_config(
@@ -993,16 +1007,47 @@ def main():
         st.markdown("---")
         # --------------------
         
-        # Video selection
-        video_files = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
+        # Source Selection Tabs
+        tab_local, tab_link, tab_gdrive = st.tabs(["📂 Local Files", "🔗 YouTube/Direct Link", "☁️ Google Drive"])
         
-        if video_files:
-            st.write("📁 Available videos:")
-            selected_video = st.selectbox("Select video", video_files)
-        else:
-            selected_video = None
-            st.info("No video files found in current directory")
+        with tab_local:
+            # Video selection
+            video_files = [f for f in os.listdir('.') if f.endswith(('.mp4', '.flv', '.avi', '.mov', '.mkv'))]
+            
+            if video_files:
+                st.write("📁 Available videos:")
+                selected_video = st.selectbox("Select video", video_files)
+            else:
+                selected_video = None
+                st.info("No video files found in current directory")
         
+        with tab_link:
+            external_url = st.text_input("🔗 Video URL (Direct link or YouTube)")
+            if external_url:
+                st.info("Direct streaming from URL is supported via FFmpeg.")
+                video_path = external_url
+            elif selected_video:
+                video_path = selected_video
+            else:
+                video_path = None
+
+        with tab_gdrive:
+            gdrive_url = st.text_input("☁️ Google Drive Link (Public Share Link)")
+            if gdrive_url:
+                if st.button("📥 Download from Google Drive"):
+                    with st.spinner("Downloading from Google Drive..."):
+                        downloaded_path = download_from_gdrive(gdrive_url)
+                        if downloaded_path:
+                            st.success(f"✅ Downloaded: {downloaded_path}")
+                            st.session_state['selected_video_path'] = downloaded_path
+                            st.rerun()
+
+        # Update video_path based on session state or selection
+        if 'selected_video_path' in st.session_state:
+            video_path = st.session_state['selected_video_path']
+        elif not video_path and selected_video:
+            video_path = selected_video
+
         # Video upload
         uploaded_file = st.file_uploader("Or upload new video", type=['mp4', '.flv', '.avi', '.mov', '.mkv'])
         
