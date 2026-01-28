@@ -539,32 +539,46 @@ def get_broadcast_stream_key(service, broadcast_id):
         st.error(f"Error getting broadcast stream key: {e}")
         return None
 
-def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, audio_path=None, mode="Normal Loop"):
+def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, session_id=None, audio_path=None, mode="Normal Loop", loop_24=False):
     """Run FFmpeg for streaming with enhanced logging and multiple modes"""
     output_url = rtmp_url or f"rtmp://a.rtmp.youtube.com/live2/{stream_key}"
     scale = "-vf scale=720:1280" if is_shorts else ""
-    cmd = []
     
-    if "Audio Duration Mode" in mode and audio_path:
-        # Mode 1: Video loops, audio starts after 15s, stop when audio ends
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-            audio_duration = float(result.stdout.strip())
-            total_duration = audio_duration + 15
-            
-            # Optimized for "Excellent" status and stability
+    while True:
+        cmd = []
+        if "Audio Duration Mode" in mode and audio_path:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                audio_duration = float(result.stdout.strip())
+                total_duration = audio_duration + 15
+                
+                cmd = [
+                    "ffmpeg", "-re", "-stream_loop", "-1", "-i", video_path,
+                    "-i", audio_path,
+                    "-filter_complex", f"[1:a]adelay=15000|15000[delayed_audio];[0:v]{scale[4:] if scale else 'copy'},fps=30,format=yuv420p[v]",
+                    "-map", "[v]", "-map", "[delayed_audio]",
+                    "-t", str(total_duration),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-x264-params", "nal-hrd=cbr:force-cfr=1",
+                    "-b:v", "6000k", "-minrate", "6000k", "-maxrate", "6000k", "-bufsize", "6000k",
+                    "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+                    "-f", "flv", output_url
+                ]
+            except Exception as e:
+                log_callback(f"❌ Error calculating audio duration: {e}. Falling back to normal.")
+                cmd = []
+
+        if not cmd:
             cmd = [
                 "ffmpeg", "-re", "-stream_loop", "-1", "-i", video_path,
-                "-i", audio_path,
-                "-filter_complex", f"[1:a]adelay=15000|15000[delayed_audio];[0:v]{scale[4:] if scale else 'copy'},fps=30,format=yuv420p[v]",
-                "-map", "[v]", "-map", "[delayed_audio]",
-                "-t", str(total_duration),
+                "-vf", f"{scale[4:] if scale else 'format=yuv420p'},fps=30",
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                 "-x264-params", "nal-hrd=cbr:force-cfr=1",
                 "-b:v", "6000k", "-minrate", "6000k", "-maxrate", "6000k", "-bufsize", "6000k",
@@ -572,51 +586,33 @@ def run_ffmpeg(video_path, stream_key, is_shorts, log_callback, rtmp_url=None, s
                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
                 "-f", "flv", output_url
             ]
-        except Exception as e:
-            log_callback(f"❌ Error calculating audio duration: {e}. Falling back to normal.")
-            cmd = []
-
-    if not cmd:
-        # Mode 2: Normal loop full audio and video - Optimized for stability
-        cmd = [
-            "ffmpeg", "-re", "-stream_loop", "-1", "-i", video_path,
-            "-vf", f"{scale[4:] if scale else 'format=yuv420p'},fps=30",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-x264-params", "nal-hrd=cbr:force-cfr=1",
-            "-b:v", "6000k", "-minrate", "6000k", "-maxrate", "6000k", "-bufsize", "6000k",
-            "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-            "-f", "flv", output_url
-        ]
-    
-    start_msg = f"🚀 Starting FFmpeg: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
-    log_callback(start_msg)
-    if session_id:
-        log_to_database(session_id, "INFO", start_msg, video_path)
-    
-    try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in process.stdout:
-            log_callback(line.strip())
-            if session_id:
-                log_to_database(session_id, "FFMPEG", line.strip(), video_path)
-        process.wait()
         
-        end_msg = "✅ Streaming completed successfully"
-        log_callback(end_msg)
+        start_msg = f"🚀 Starting FFmpeg: {' '.join(cmd[:8])}... [RTMP URL hidden for security]"
+        log_callback(start_msg)
         if session_id:
-            log_to_database(session_id, "INFO", end_msg, video_path)
+            log_to_database(session_id, "INFO", start_msg, video_path)
+        
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in process.stdout:
+                log_callback(line.strip())
+                if session_id:
+                    log_to_database(session_id, "FFMPEG", line.strip(), video_path)
+            process.wait()
             
-    except Exception as e:
-        error_msg = f"❌ FFmpeg Error: {e}"
-        log_callback(error_msg)
-        if session_id:
-            log_to_database(session_id, "ERROR", error_msg, video_path)
-    finally:
-        final_msg = "⏹️ Streaming session ended"
-        log_callback(final_msg)
-        if session_id:
-            log_to_database(session_id, "INFO", final_msg, video_path)
+            if not loop_24:
+                break
+                
+            log_callback("🕒 24/7 Mode: Restarting stream...")
+            time.sleep(5)
+        except Exception as e:
+            error_msg = f"❌ FFmpeg Error: {e}"
+            log_callback(error_msg)
+            if session_id:
+                log_to_database(session_id, "ERROR", error_msg, video_path)
+            if not loop_24:
+                break
+            time.sleep(10)
 
 def auto_process_auth_code():
     """Automatically process authorization code from URL"""
@@ -699,7 +695,7 @@ def get_youtube_categories():
     }
 
 # Fungsi untuk auto start streaming
-def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, audio_path=None, streaming_mode="Normal Loop"):
+def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=None, session_id=None, audio_path=None, streaming_mode="Normal Loop", loop_24=False):
     """Auto start streaming dengan konfigurasi default"""
     if not video_path or not stream_key:
         st.error("❌ Video atau stream key tidak ditemukan!")
@@ -721,7 +717,7 @@ def auto_start_streaming(video_path, stream_key, is_shorts=False, custom_rtmp=No
     # Jalankan FFmpeg di thread terpisah
     st.session_state['ffmpeg_thread'] = threading.Thread(
         target=run_ffmpeg, 
-        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, audio_path, streaming_mode), 
+        args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, session_id, audio_path, streaming_mode, loop_24), 
         daemon=True
     )
     st.session_state['ffmpeg_thread'].start()
@@ -793,6 +789,42 @@ def download_from_gdrive(url):
     except Exception as e:
         st.error(f"❌ Error downloading from Google Drive: {e}")
         return None
+
+def render_video_audio(video_path, audio_path, output_name):
+    """Render video and audio together, looping video to match audio duration"""
+    try:
+        if not output_name.endswith('.mp4'):
+            output_name += '.mp4'
+        output_path = os.path.join('rendered_files', output_name)
+        
+        # Get audio duration
+        import subprocess
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        audio_duration = float(result.stdout.strip())
+        
+        # Render command: Loop video to match audio duration exactly
+        # -stream_loop -1 loops the input
+        # -shortest or -t to stop at audio length
+        cmd = [
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-c:a", "aac", "-b:a", "128k",
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-t", str(audio_duration),
+            "-f", "mp4", output_path
+        ]
+        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return process, output_path
+    except Exception as e:
+        st.error(f"❌ Rendering error: {e}")
+        return None, None
 
 def main():
     # Page configuration must be the first Streamlit command
@@ -1008,7 +1040,7 @@ def main():
         # --------------------
         
         # Source Selection Tabs
-        tab_local, tab_link, tab_gdrive = st.tabs(["📂 Local Files", "🔗 YouTube/Direct Link", "☁️ Google Drive"])
+        tab_local, tab_link, tab_gdrive, tab_render = st.tabs(["📂 Local Files", "🔗 Link", "☁️ Drive", "🛠️ Render & List"])
         
         with tab_local:
             # Video selection
@@ -1041,6 +1073,41 @@ def main():
                             st.success(f"✅ Downloaded: {downloaded_path}")
                             st.session_state['selected_video_path'] = downloaded_path
                             st.rerun()
+
+        with tab_render:
+            st.subheader("🛠️ Manual Render (Merge Video + Audio)")
+            r_video = st.file_uploader("📹 Upload Video for Render", type=['mp4', 'mov', 'avi'])
+            r_audio = st.file_uploader("🎵 Upload Audio for Render", type=['mp3', 'wav', 'm4a'])
+            r_name = st.text_input("📄 Output Filename", value="rendered_stream_1")
+            
+            if st.button("🏗️ Start Render"):
+                if r_video and r_audio:
+                    v_tmp = "tmp_v.mp4"
+                    a_tmp = "tmp_a.mp3"
+                    with open(v_tmp, "wb") as f: f.write(r_video.getbuffer())
+                    with open(a_tmp, "wb") as f: f.write(r_audio.getbuffer())
+                    
+                    with st.spinner("Rendering... please wait..."):
+                        proc, out_p = render_video_audio(v_tmp, a_tmp, r_name)
+                        if proc:
+                            proc.wait()
+                            st.success(f"✅ Render Complete! Saved to {out_p}")
+                            st.rerun()
+                else:
+                    st.warning("Please upload both video and audio.")
+
+            st.markdown("---")
+            st.subheader("📋 Rendered Files List")
+            if os.path.exists('rendered_files'):
+                r_files = [f for f in os.listdir('rendered_files') if f.endswith('.mp4')]
+                if r_files:
+                    selected_r = st.selectbox("Select from Rendered List", r_files)
+                    if st.button("🎯 Use Selected Render"):
+                        st.session_state['selected_video_path'] = os.path.join('rendered_files', selected_r)
+                        st.success(f"Selected: {selected_r}")
+                        st.rerun()
+                else:
+                    st.info("No rendered files found.")
 
         # Update video_path based on session state or selection
         if 'selected_video_path' in st.session_state:
@@ -1439,6 +1506,7 @@ def main():
             
             with col_tech1:
                 is_shorts = st.checkbox("📱 Shorts Mode (720x1280)")
+                loop_24 = st.checkbox("🕒 24/7 Loop Mode", value=True, help="Automatically restart the stream forever.")
                 enable_chat = st.checkbox("💬 Enable Live Chat", value=True)
             
             with col_tech2:
@@ -1515,7 +1583,7 @@ def main():
                 
                 st.session_state['ffmpeg_thread'] = threading.Thread(
                     target=run_ffmpeg, 
-                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], audio_path, streaming_mode), 
+                    args=(video_path, stream_key, is_shorts, log_callback, custom_rtmp or None, st.session_state['session_id'], audio_path, streaming_mode, loop_24), 
                     daemon=True
                 )
                 st.session_state['ffmpeg_thread'].start()
